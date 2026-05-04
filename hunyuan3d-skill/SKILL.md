@@ -1,47 +1,123 @@
 ---
-name: hunyuan3d-skill
-description: Interface with Hunyuan3D 2.0 via MCP tools to generate high-resolution textured 3D assets. Use when the user wants to trigger 3D synthesis (Text-to-3D or Image-to-3D) using Model Context Protocol (MCP) tools.
+name: hunyuan3d-blender
+description: "Use this skill when generating a 3D model from an image or text prompt via Hunyuan3D MCP tools and importing the result into Blender. Trigger whenever mcp__hunyuan3d tools are involved OR when the user says 'generate from image', 'generate from text', 'AI 3D model', or 'Hunyuan3D'. Always pair with blender-assembly skill when the imported mesh will be combined with other Blender geometry."
 ---
 
-# Hunyuan3D 2.0 MCP Skill
+# Hunyuan3D → Blender Skill
 
-## Overview
-This skill guides the use of Hunyuan3D 2.0 through MCP (Model Context Protocol) tools. It focuses on the agentic workflow of transforming text prompts or images into production-ready 3D meshes (GLB/OBJ).
+Covers the full pipeline: generate a 3D mesh via Hunyuan3D MCP → import into Blender → integrate with scene geometry.
 
-## MCP Tool Workflow
+## Phase 1: Generate the Mesh
 
-When this skill is active, you should look for and utilize the following types of MCP tools (names may vary based on your local MCP server configuration):
+### Step 1 — Health check first
+```python
+server_health()   # confirm API is reachable before waiting on generation
+```
 
-### 1. `generate_3d_from_text`
-- **When to use**: To create a 3D model from a text description.
-- **Inputs**: 
-    - `prompt`: Detailed description of the object.
-    - `steps` (optional): Number of diffusion steps (default 30-50).
-- **Strategy**: Encourage the user to provide architectural or material details for better results.
+### Step 2 — Choose model quality
 
-### 2. `generate_3d_from_image`
-- **When to use**: To create a 3D model from a reference image.
-- **Inputs**: 
-    - `image_path` or `image_data`: Path to the local image or base64 data.
-    - `texture_gen` (optional): Boolean to enable/disable the Hunyuan3D-Paint stage.
-- **Strategy**: If the image has a complex background, recommend using a background removal tool first for cleaner geometry.
+| Use case | octree_resolution | num_inference_steps | notes |
+|---|---|---|---
+| Quick draft | 128 | 5 | turbo, fast |
+| Final quality | 384 | 50 | slow (~2 min) |
 
-### 3. `apply_3d_texture`
-- **When to use**: To apply high-resolution textures to an existing mesh using a reference image.
-- **Inputs**:
-    - `mesh_path`: Path to the untextured `.obj` or `.glb`.
-    - `reference_image`: Image used to guide the texture synthesis.
+### Step 3 — Generate
 
-## Technical Context for Agents
-Hunyuan3D 2.0 operates in two distinct stages which the MCP tools abstract:
-1.  **Stage 1: Shape Generation (Hunyuan3D-DiT)** - A flow-based diffusion transformer creates the initial geometry.
-2.  **Stage 2: Texture Synthesis (Hunyuan3D-Paint)** - A 1.3B parameter model applies 4K textures and PBR materials.
+From image (preferred — more accurate geometry):
+```python
+path = generate_3d_from_image(
+    image_path="/abs/path/to/image.png",
+    seed=1234,
+    octree_resolution=128,   # 128 draft / 384 quality
+    num_inference_steps=5,   # 5 turbo / 50 quality
+    guidance_scale=5.0,
+)
+# returns: absolute path to .glb file
+```
 
-## Best Practices
-- **Resolution**: Use the highest available resolution for input images (Stage 1 benefits from clear silhouettes).
-- **VRAM**: If the MCP server reports "Out of Memory," suggest using the "mini" model variant if supported by the tool parameters.
-- **Feedback**: After generation, provide the user with the path to the exported `.glb` and suggest opening it in a 3D viewer (like Blender) for inspection.
+From text:
+```python
+path = generate_3d_from_text(
+    text="a wooden chair with four legs",
+    seed=1234,
+    octree_resolution=128,
+    num_inference_steps=5,
+    guidance_scale=5.0,
+)
+```
 
-## Error Handling
-- **Missing Weights**: If the tool fails with a "Weights not found" error, advise the user to check their `tencent/Hunyuan3D-2` download on Hugging Face.
-- **Connection Error**: If the MCP server is unreachable, ensure `api_server.py` is running in the Hunyuan3D-2 environment.
+For long generations (quality mode), use async:
+```python
+uid = generate_3d_async(image_path="/abs/path/img.png", octree_resolution=384, num_inference_steps=50)
+# poll every ~30s
+result = check_generation_status(uid)   # returns path when done
+```
+
+Output is always a `.glb` file in `gradio_cache/`.
+
+---
+
+## Phase 2: Import into Blender
+
+```python
+import bpy, os
+
+def import_hunyuan_glb(glb_path, name="HY3D_Mesh"):
+    # Deselect all, import
+    bpy.ops.object.select_all(action='DESELECT')
+    bpy.ops.import_scene.gltf(filepath=glb_path)
+
+    # Collect imported objects
+    imported = [o for o in bpy.context.selected_objects]
+
+    # Hunyuan3D exports in meters but scale factor varies — check Z extent
+    for obj in imported:
+        obj.name = name
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+
+    return imported
+```
+
+**Common import issues:**
+
+| Problem | Fix |
+|---|---|
+| Model is 100× too large | `obj.scale = (0.01, 0.01, 0.01)` then `transform_apply(scale=True)` |
+| Model faces wrong direction | Rotate 90° on X: `obj.rotation_euler.x = math.radians(90)` then `transform_apply` |
+| Floating mesh fragments | Run `FloaterRemover` before export, or delete small loose parts in Blender |
+
+Always call `verify_bounds(name)` (from blender-assembly) after import to check actual extents before positioning the mesh in scene.
+
+---
+
+## Phase 3: Integrate with Scene (use blender-assembly rules)
+
+After import, treat the Hunyuan mesh like any other Blender object:
+
+1. **`verify_bounds()`** on the imported mesh — get real extents
+2. **Derive placement** from those bounds — never guess position relative to other parts
+3. **`verify_overlap()`** at every joint between the AI mesh and hand-built geometry
+4. **`finalize()`** before parenting or joining
+
+```python
+# Example: sit the AI mesh on a handbuilt platform
+b_mesh  = verify_bounds("HY3D_Mesh")
+b_plat  = verify_bounds("Platform")
+# Place mesh so its bottom aligns with platform top
+mesh_obj = bpy.data.objects["HY3D_Mesh"]
+mesh_obj.location.z += b_plat['z'][1] - b_mesh['z'][0]
+verify_overlap("HY3D_Mesh", "Platform", axis='z')
+```
+
+---
+
+## Workflow Checklist
+
+1. `server_health()` — confirm server up
+2. Choose quality tier (128/5 draft or 384/50 final)
+3. `generate_3d_from_image()` or `generate_3d_from_text()` — get `.glb` path
+4. `import_hunyuan_glb()` — import + apply transforms
+5. `verify_bounds()` — check actual scale/extents
+6. Fix scale/orientation if needed, re-apply transforms
+7. Use blender-assembly `verify_bounds` / `verify_overlap` / `finalize` for scene integration
