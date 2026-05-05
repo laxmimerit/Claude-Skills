@@ -66,6 +66,7 @@ If the WSL distro is not `Ubuntu`, replace with the correct name (e.g. `Ubuntu-2
 - Scale uniformly so the model fits `target_height=2.0` units. Derive scale factor from measured Z bounds, never guess.
 - Re-measure bounds after scaling. Centre on X/Y. Seat bottom at `z=0` (top of base disc).
 - Shade smooth after seating.
+- After seating, check model orientation. If it faces away from camera, rotate on Z axis to face front.
 - Print final height, bottom_z, and scale factor to confirm correctness.
 
 ---
@@ -74,7 +75,6 @@ If the WSL distro is not `Ubuntu`, replace with the correct name (e.g. `Ubuntu-2
 
 - Always override baked GLB materials with a fresh Principled BSDF.
 - Match base color and roughness to the character's intended look.
-- Set a default rotation of `z = 0` and adjust only if the model faces away from camera after import.
 
 ---
 
