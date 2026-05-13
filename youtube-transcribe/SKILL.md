@@ -13,11 +13,11 @@ description: >
 
 # YouTube Transcribe
 
-## Step 0 — Dependency check (first run only)
+## Step 0 — GPU + dependency check (always run before transcribing)
 If `youtube-transcribe/transcript.json` doesn't already exist, run this check first:
 
 ```python
-import importlib
+import importlib, sys
 
 def check(pkg, import_name=None):
     try:
@@ -35,16 +35,28 @@ print(f"torch          : {'✅ ' + torch_ver if torch_ok else '❌ missing'}")
 if torch_ok:
     import torch
     cuda = torch.cuda.is_available()
-    print(f"CUDA available : {'✅ ' + torch.version.cuda if cuda else '❌ no — will run on CPU'}")
+    print(f"CUDA available : {'✅ ' + torch.version.cuda if cuda else '❌ no'}")
     if cuda:
         print(f"GPU            : {torch.cuda.get_device_name(0)}")
+    else:
+        print()
+        print("⚠️  torch is installed but CUDA is NOT available.")
+        print("   This almost always means you have the CPU-only torch wheel.")
+        print("   Check your torch build:")
+        print(f"   torch version  : {torch.__version__}")
+        print(f"   torch.version.cuda : {torch.version.cuda}")
+        print()
+        print("   Fix: reinstall torch with CUDA support.")
+        print("   → Go to https://pytorch.org/get-started/locally/")
+        print("     Select your OS, pip, Python, and CUDA version.")
+        print("     Run the generated command (it will look like:")
+        print("     pip install torch --index-url https://download.pytorch.org/whl/cuXXX)")
+        print()
+        print("   Do NOT proceed until CUDA shows ✅ above.")
+        sys.exit(1)
 ```
 
-Based on the output:
-- If `openai-whisper` is missing → `pip install openai-whisper`
-- If `torch` is missing → visit https://pytorch.org/get-started/locally/ and use the install selector for the correct command matching the user's OS, CUDA version, and Python version. **Do not guess a CUDA version.**
-- If `torch` is present but CUDA is not available → ask the user if they want GPU support; if yes, point them to the PyTorch selector to reinstall with the correct CUDA build.
-- If both are present and CUDA is available → proceed directly, no installs needed.
+**Do not proceed to transcription if this script exits with an error.** Fix the torch install first.
 
 ## Step 1 — Find the video
 Use the path the user gave. If none, glob `*.mp4 *.mkv *.mov *.avi` in the CWD.
@@ -79,22 +91,27 @@ os.environ["PATH"] = r"C:\ffmpeg\bin" + os.pathsep + os.environ.get("PATH", "")
 import torch
 import whisper
 
+# Hard-fail if GPU is not available — never silently fall back to CPU
+if not torch.cuda.is_available():
+    sys.exit(
+        "❌ CUDA not available. Run the Step 0 check script to diagnose.\n"
+        "   Reinstall torch with CUDA support before transcribing."
+    )
+
 VIDEO = sys.argv[1] if len(sys.argv) > 1 else None
 if not VIDEO or not os.path.isfile(VIDEO):
     sys.exit(f"Error: file not found: {VIDEO!r}")
 
 # Output goes into the same folder as this script (youtube-transcribe/)
 OUT = os.path.dirname(os.path.abspath(__file__))
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Device: {device}")
+print(f"Device : cuda — {torch.cuda.get_device_name(0)}")
 
-model = whisper.load_model("medium", device=device)
-result = model.transcribe(VIDEO, verbose=True, language="en", fp16=(device == "cuda"))
+model = whisper.load_model("medium", device="cuda")
+result = model.transcribe(VIDEO, verbose=True, language="en", fp16=True)
 
 # Release GPU memory after transcription
-if device == "cuda":
-    del model
-    torch.cuda.empty_cache()
+del model
+torch.cuda.empty_cache()
 
 def ts_chapter(s):
     """M:SS or H:MM:SS for YouTube chapter timestamps."""
@@ -125,7 +142,7 @@ for fname in ["transcript.txt", "transcript.srt", "transcript.json"]:
     print(f"  {path}  ({os.path.getsize(path):,} bytes)")
 ```
 
-**Runtime:** ~15–40 min on CPU, 2–8 min on GPU. Tell the user to wait.
+**Runtime:** 2–8 min on GPU. Tell the user to wait.
 
 ## Step 5 — Read the transcript
 - Read `youtube-transcribe/transcript.txt` for full text.
